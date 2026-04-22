@@ -89,8 +89,7 @@ router.post("/join", requireAuth, async (request, response) => {
 
 router.get("/:code", requireAuth, async (request, response) => {
   const meeting = await prisma.meeting.findUnique({
-    where: { code: request.params.code.toUpperCase() },
-    include: {
+      where: { code: (request.params.code as string).toUpperCase() },    include: {
       participants: {
         include: {
           user: true,
@@ -109,7 +108,7 @@ router.get("/:code", requireAuth, async (request, response) => {
 
 router.get("/:code/transcript", requireAuth, async (request, response) => {
   const meeting = await prisma.meeting.findUnique({
-    where: { code: request.params.code.toUpperCase() },
+    where: { code: (request.params.code as string).toUpperCase() },
   });
 
   if (!meeting) {
