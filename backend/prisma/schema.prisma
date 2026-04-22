@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TurnStatus {
+  PENDING
+  PARTIAL
+  FINAL
+  FAILED
+}
+
+model User {
+  id               String               @id @default(cuid())
+  email            String               @unique
+  name             String
+  passwordHash     String
+  createdAt        DateTime             @default(now())
+  meetingsCreated  Meeting[]            @relation("MeetingCreator")
+  memberships      MeetingParticipant[]
+}
+
+model Meeting {
+  id               String               @id @default(cuid())
+  code             String               @unique
+  createdById      String
+  title            String
+  isActive         Boolean              @default(true)
+  createdAt        DateTime             @default(now())
+  endedAt          DateTime?
+  createdBy        User                 @relation("MeetingCreator", fields: [createdById], references: [id])
+  participants     MeetingParticipant[]
+  speechTurns      SpeechTurn[]
+}
+
+model MeetingParticipant {
+  id               String               @id @default(cuid())
+  meetingId        String
+  userId           String
+  displayName      String
+  joinedAt         DateTime             @default(now())
+  leftAt           DateTime?
+  socketId         String?
+  muted            Boolean              @default(false)
+  meeting          Meeting              @relation(fields: [meetingId], references: [id])
+  user             User                 @relation(fields: [userId], references: [id])
+  speechTurns      SpeechTurn[]
+
+  @@unique([meetingId, userId])
+}
+
+model SpeechTurn {
+  id                    String               @id @default(cuid())
+  meetingId             String
+  meetingParticipantId  String
+  sequenceNumber        Int
+  speechStartTime       DateTime
+  speechEndTime         DateTime?
+  status                TurnStatus           @default(PENDING)
+  latestText            String               @default("")
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  meeting               Meeting              @relation(fields: [meetingId], references: [id])
+  meetingParticipant    MeetingParticipant   @relation(fields: [meetingParticipantId], references: [id])
+  transcriptSegments    TranscriptSegment[]
+
+  @@index([meetingId, sequenceNumber])
+}
+
+model TranscriptSegment {
+  id                    String               @id @default(cuid())
+  speechTurnId          String
+  chunkIndex            Int
+  text                  String
+  isFinal               Boolean              @default(false)
+  createdAt             DateTime             @default(now())
+  processingCompletedAt DateTime
+  speechTurn            SpeechTurn           @relation(fields: [speechTurnId], references: [id])
+
+  @@index([speechTurnId, chunkIndex])
+}
