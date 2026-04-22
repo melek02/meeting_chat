@@ -9,11 +9,7 @@ export function createApp() {
 
   app.use(
     cors({
-      origin: [
-        "http://localhost:5173",
-        "https://meeting-chat-frontend.onrender.com",
-        config.clientUrl,
-      ],
+      origin: true,
       credentials: true,
     })
   );
