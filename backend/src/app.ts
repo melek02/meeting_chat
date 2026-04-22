@@ -20,6 +20,12 @@ export function createApp() {
     response.json({ ok: true });
   });
 
+  app.get("/rtc-config", (_request, response) => {
+    response.json({
+      iceServers: config.rtcIceServers,
+    });
+  });
+
   app.use("/auth", authRouter);
   app.use("/meetings", meetingRouter);
 

@@ -105,6 +105,7 @@ export function MeetingPage() {
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const localTurnRef = useRef<LocalTurnState | null>(null);
   const recognitionRunningRef = useRef(false);
@@ -238,20 +239,31 @@ export function MeetingPage() {
 
         setRemoteStreams((current) => {
           const existing = current.find((entry) => entry.socketId === targetSocketId);
+          const remoteStream = stream ?? existing?.stream ?? new MediaStream();
+
+          if (!remoteStream.getTracks().some((track) => track.id === event.track.id)) {
+            remoteStream.addTrack(event.track);
+          }
 
           if (existing) {
             return current.map((entry) =>
-              entry.socketId === targetSocketId ? { ...entry, stream } : entry
+              entry.socketId === targetSocketId ? { ...entry, stream: remoteStream } : entry
             );
           }
 
-          return [...current, { socketId: targetSocketId, stream }];
+          return [...current, { socketId: targetSocketId, stream: remoteStream }];
         });
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        if (["disconnected", "failed", "closed"].includes(peerConnection.iceConnectionState)) {
+          cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
+        }
       };
 
       peerConnection.onconnectionstatechange = () => {
         if (["disconnected", "failed", "closed"].includes(peerConnection.connectionState)) {
-          cleanupPeerConnection(peerConnectionsRef, setRemoteStreams, targetSocketId);
+          cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
         }
       };
 
@@ -288,7 +300,12 @@ export function MeetingPage() {
       setParticipants((current) => current.filter((entry) => entry.id !== participant.id));
 
       if (participant.socketId) {
-        cleanupPeerConnection(peerConnectionsRef, setRemoteStreams, participant.socketId);
+        cleanupPeerConnection(
+          peerConnectionsRef,
+          pendingIceCandidatesRef,
+          setRemoteStreams,
+          participant.socketId
+        );
       }
     });
 
@@ -318,6 +335,7 @@ export function MeetingPage() {
     socket.on("webrtc:offer", async ({ fromSocketId, sdp }: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
       const peerConnection = await ensurePeerConnection(fromSocketId, false);
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+      await flushPendingIceCandidates(fromSocketId, peerConnectionsRef.current, pendingIceCandidatesRef.current);
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
@@ -336,13 +354,24 @@ export function MeetingPage() {
       }
 
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+      await flushPendingIceCandidates(fromSocketId, peerConnectionsRef.current, pendingIceCandidatesRef.current);
     });
 
     socket.on("webrtc:ice-candidate", async ({ fromSocketId, candidate }: { fromSocketId: string; candidate: RTCIceCandidateInit }) => {
       const peerConnection =
         peerConnectionsRef.current.get(fromSocketId) ?? (await ensurePeerConnection(fromSocketId, false));
 
-      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      if (!peerConnection.remoteDescription) {
+        const current = pendingIceCandidatesRef.current.get(fromSocketId) ?? [];
+        pendingIceCandidatesRef.current.set(fromSocketId, [...current, candidate]);
+        return;
+      }
+
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (iceError) {
+        console.error("failed to add ICE candidate", iceError);
+      }
     });
 
     socket.on("meeting:ended", () => {
@@ -371,6 +400,7 @@ export function MeetingPage() {
 
       peerConnectionsRef.current.forEach((connection) => connection.close());
       peerConnectionsRef.current.clear();
+      pendingIceCandidatesRef.current.clear();
       setRemoteStreams([]);
     };
   }, [localStream, meetingCode, navigate, token]);
@@ -679,8 +709,7 @@ export function MeetingPage() {
             </article>
 
             {remoteStreams.map((remoteEntry) => {
-              const participant =
-                participants.find((entry) => entry.socketId === remoteEntry.socketId) ?? participants[0];
+              const participant = participants.find((entry) => entry.socketId === remoteEntry.socketId);
 
               return (
                 <RemoteVideoCard
@@ -962,6 +991,7 @@ function mergeTranscriptTurns(current: TranscriptTurn[], incoming: TranscriptTur
 
 function cleanupPeerConnection(
   peerConnectionsRef: MutableRefObject<Map<string, RTCPeerConnection>>,
+  pendingIceCandidatesRef: MutableRefObject<Map<string, RTCIceCandidateInit[]>>,
   setRemoteStreams: Dispatch<SetStateAction<RemoteStreamEntry[]>>,
   targetSocketId: string
 ) {
@@ -972,7 +1002,36 @@ function cleanupPeerConnection(
     peerConnectionsRef.current.delete(targetSocketId);
   }
 
+  pendingIceCandidatesRef.current.delete(targetSocketId);
   setRemoteStreams((current) => current.filter((entry) => entry.socketId !== targetSocketId));
+}
+
+async function flushPendingIceCandidates(
+  targetSocketId: string,
+  peerConnections: Map<string, RTCPeerConnection>,
+  pendingIceCandidates: Map<string, RTCIceCandidateInit[]>
+) {
+  const peerConnection = peerConnections.get(targetSocketId);
+
+  if (!peerConnection?.remoteDescription) {
+    return;
+  }
+
+  const queuedCandidates = pendingIceCandidates.get(targetSocketId);
+
+  if (!queuedCandidates?.length) {
+    return;
+  }
+
+  pendingIceCandidates.delete(targetSocketId);
+
+  for (const candidate of queuedCandidates) {
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (iceError) {
+      console.error("failed to flush queued ICE candidate", iceError);
+    }
+  }
 }
 
 function RemoteVideoCard({
@@ -985,16 +1044,31 @@ function RemoteVideoCard({
   active: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
+    const videoElement = videoRef.current;
+    const audioElement = audioRef.current;
+
+    if (videoElement) {
+      const videoTracks = stream.getVideoTracks();
+      videoElement.srcObject = videoTracks.length ? new MediaStream(videoTracks) : null;
+      videoElement.muted = true;
+      void videoElement.play().catch(() => undefined);
+    }
+
+    if (audioElement) {
+      const audioTracks = stream.getAudioTracks();
+      audioElement.srcObject = audioTracks.length ? new MediaStream(audioTracks) : null;
+      audioElement.muted = false;
+      void audioElement.play().catch(() => undefined);
     }
   }, [stream]);
 
   return (
     <article className={`participant-tile ${active ? "active-speaker" : ""}`}>
       <video ref={videoRef} autoPlay playsInline className="participant-video" />
+      <audio ref={audioRef} autoPlay playsInline />
       <div>
         <strong>{title}</strong>
         <p>Remote live stream</p>
