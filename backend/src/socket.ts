@@ -99,12 +99,12 @@ export function createSocketServer(server: HttpServer) {
         return;
       }
 
-      const updatedParticipant = await prisma.meetingParticipant.update({
+      await prisma.meetingParticipant.update({
         where: { id: participant.id },
         data: { socketId: socket.id, leftAt: null },
       });
 
-      await runtimeManager.attachParticipant(meeting, updatedParticipant);
+      await runtimeManager.attachParticipant(meeting, participant);
 
       socket.join(meeting.code);
       const roomSockets = await io.in(meeting.code).fetchSockets();
@@ -129,7 +129,7 @@ export function createSocketServer(server: HttpServer) {
           })),
       });
 
-      io.to(meeting.code).emit("participant:joined", normalizeParticipant(updatedParticipant));
+      io.to(meeting.code).emit("participant:joined", normalizeParticipant(participant));
     });
 
     socket.on("meeting:leave-room", async (payload) => {
@@ -396,29 +396,6 @@ export function createSocketServer(server: HttpServer) {
 
       await runtimeManager.stopMeeting(meeting.id);
       io.to(meeting.code).emit("meeting:ended", { code: meeting.code });
-    });
-
-    socket.on("disconnect", async () => {
-      const participant = await prisma.meetingParticipant.findFirst({
-        where: {
-          socketId: socket.id,
-        },
-        include: {
-          meeting: true,
-        },
-      });
-
-      if (!participant) {
-        return;
-      }
-
-      await prisma.meetingParticipant.update({
-        where: { id: participant.id },
-        data: { leftAt: new Date(), socketId: null },
-      });
-
-      await runtimeManager.removeParticipant(participant.meetingId, participant.id);
-      io.to(participant.meeting.code).emit("participant:left", normalizeParticipant(participant));
     });
   });
 

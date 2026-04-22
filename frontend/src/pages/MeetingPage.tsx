@@ -46,9 +46,26 @@ const rtcConfiguration: RTCConfiguration = {
     {
       urls: "stun:stun.l.google.com:19302",
     },
+    {
+      urls: "stun:stun1.l.google.com:19302",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ],
 };
-
 export function MeetingPage() {
   const { code = "" } = useParams();
   const meetingCode = code.toUpperCase();
@@ -88,7 +105,6 @@ export function MeetingPage() {
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const localTurnRef = useRef<LocalTurnState | null>(null);
   const recognitionRunningRef = useRef(false);
@@ -222,34 +238,20 @@ export function MeetingPage() {
 
         setRemoteStreams((current) => {
           const existing = current.find((entry) => entry.socketId === targetSocketId);
-          const remoteStream =
-            stream ??
-            existing?.stream ??
-            new MediaStream();
-
-          if (!remoteStream.getTracks().some((track) => track.id === event.track.id)) {
-            remoteStream.addTrack(event.track);
-          }
 
           if (existing) {
             return current.map((entry) =>
-              entry.socketId === targetSocketId ? { ...entry, stream: remoteStream } : entry
+              entry.socketId === targetSocketId ? { ...entry, stream } : entry
             );
           }
 
-          return [...current, { socketId: targetSocketId, stream: remoteStream }];
+          return [...current, { socketId: targetSocketId, stream }];
         });
-      };
-
-      peerConnection.oniceconnectionstatechange = () => {
-        if (["disconnected", "failed", "closed"].includes(peerConnection.iceConnectionState)) {
-          cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
-        }
       };
 
       peerConnection.onconnectionstatechange = () => {
         if (["disconnected", "failed", "closed"].includes(peerConnection.connectionState)) {
-          cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
+          cleanupPeerConnection(peerConnectionsRef, setRemoteStreams, targetSocketId);
         }
       };
 
@@ -286,12 +288,7 @@ export function MeetingPage() {
       setParticipants((current) => current.filter((entry) => entry.id !== participant.id));
 
       if (participant.socketId) {
-        cleanupPeerConnection(
-          peerConnectionsRef,
-          pendingIceCandidatesRef,
-          setRemoteStreams,
-          participant.socketId
-        );
+        cleanupPeerConnection(peerConnectionsRef, setRemoteStreams, participant.socketId);
       }
     });
 
@@ -321,7 +318,6 @@ export function MeetingPage() {
     socket.on("webrtc:offer", async ({ fromSocketId, sdp }: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
       const peerConnection = await ensurePeerConnection(fromSocketId, false);
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-      await flushPendingIceCandidates(fromSocketId, peerConnectionsRef.current, pendingIceCandidatesRef.current);
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
@@ -340,24 +336,13 @@ export function MeetingPage() {
       }
 
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-      await flushPendingIceCandidates(fromSocketId, peerConnectionsRef.current, pendingIceCandidatesRef.current);
     });
 
     socket.on("webrtc:ice-candidate", async ({ fromSocketId, candidate }: { fromSocketId: string; candidate: RTCIceCandidateInit }) => {
       const peerConnection =
         peerConnectionsRef.current.get(fromSocketId) ?? (await ensurePeerConnection(fromSocketId, false));
 
-      if (!peerConnection.remoteDescription) {
-        const current = pendingIceCandidatesRef.current.get(fromSocketId) ?? [];
-        pendingIceCandidatesRef.current.set(fromSocketId, [...current, candidate]);
-        return;
-      }
-
-      try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (iceError) {
-        console.error("failed to add ICE candidate", iceError);
-      }
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
     });
 
     socket.on("meeting:ended", () => {
@@ -386,7 +371,6 @@ export function MeetingPage() {
 
       peerConnectionsRef.current.forEach((connection) => connection.close());
       peerConnectionsRef.current.clear();
-      pendingIceCandidatesRef.current.clear();
       setRemoteStreams([]);
     };
   }, [localStream, meetingCode, navigate, token]);
@@ -695,7 +679,8 @@ export function MeetingPage() {
             </article>
 
             {remoteStreams.map((remoteEntry) => {
-              const participant = participants.find((entry) => entry.socketId === remoteEntry.socketId);
+              const participant =
+                participants.find((entry) => entry.socketId === remoteEntry.socketId) ?? participants[0];
 
               return (
                 <RemoteVideoCard
@@ -977,7 +962,6 @@ function mergeTranscriptTurns(current: TranscriptTurn[], incoming: TranscriptTur
 
 function cleanupPeerConnection(
   peerConnectionsRef: MutableRefObject<Map<string, RTCPeerConnection>>,
-  pendingIceCandidatesRef: MutableRefObject<Map<string, RTCIceCandidateInit[]>>,
   setRemoteStreams: Dispatch<SetStateAction<RemoteStreamEntry[]>>,
   targetSocketId: string
 ) {
@@ -988,36 +972,7 @@ function cleanupPeerConnection(
     peerConnectionsRef.current.delete(targetSocketId);
   }
 
-  pendingIceCandidatesRef.current.delete(targetSocketId);
   setRemoteStreams((current) => current.filter((entry) => entry.socketId !== targetSocketId));
-}
-
-async function flushPendingIceCandidates(
-  targetSocketId: string,
-  peerConnections: Map<string, RTCPeerConnection>,
-  pendingIceCandidates: Map<string, RTCIceCandidateInit[]>
-) {
-  const peerConnection = peerConnections.get(targetSocketId);
-
-  if (!peerConnection?.remoteDescription) {
-    return;
-  }
-
-  const queuedCandidates = pendingIceCandidates.get(targetSocketId);
-
-  if (!queuedCandidates?.length) {
-    return;
-  }
-
-  pendingIceCandidates.delete(targetSocketId);
-
-  for (const candidate of queuedCandidates) {
-    try {
-      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (iceError) {
-      console.error("failed to flush queued ICE candidate", iceError);
-    }
-  }
 }
 
 function RemoteVideoCard({
@@ -1030,30 +985,16 @@ function RemoteVideoCard({
   active: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    const videoElement = videoRef.current;
-    const audioElement = audioRef.current;
-
-    if (videoElement) {
-      videoElement.srcObject = new MediaStream(stream.getVideoTracks());
-      videoElement.muted = true;
-      void videoElement.play().catch(() => undefined);
-    }
-
-    if (audioElement) {
-      const audioTracks = stream.getAudioTracks();
-      audioElement.srcObject = audioTracks.length ? new MediaStream(audioTracks) : null;
-      audioElement.muted = false;
-      void audioElement.play().catch(() => undefined);
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
     }
   }, [stream]);
 
   return (
     <article className={`participant-tile ${active ? "active-speaker" : ""}`}>
       <video ref={videoRef} autoPlay playsInline className="participant-video" />
-      <audio ref={audioRef} autoPlay playsInline />
       <div>
         <strong>{title}</strong>
         <p>Remote live stream</p>
