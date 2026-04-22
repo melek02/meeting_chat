@@ -1,6 +1,6 @@
 import type { TurnStatus } from "@prisma/client";
 
-export type ParticipantWorkerCommand = {
+export type ParticipantWorkerCommand =
   | {
       type: "PROCESS_TURN";
       payload: {
