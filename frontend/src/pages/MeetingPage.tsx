@@ -213,6 +213,13 @@ export function MeetingPage() {
 
     const socket = getSocket(token);
 
+    const resetPeerConnections = () => {
+      peerConnectionsRef.current.forEach((connection) => connection.close());
+      peerConnectionsRef.current.clear();
+      pendingIceCandidatesRef.current.clear();
+      setRemoteStreams([]);
+    };
+
     const ensurePeerConnection = async (targetSocketId: string, shouldCreateOffer: boolean) => {
       if (peerConnectionsRef.current.has(targetSocketId)) {
         return peerConnectionsRef.current.get(targetSocketId)!;
@@ -282,7 +289,22 @@ export function MeetingPage() {
       return peerConnection;
     };
 
-    socket.emit("meeting:join-room", { code: meetingCode });
+    const joinRoom = () => {
+      socket.emit("meeting:join-room", { code: meetingCode });
+    };
+
+    socket.on("connect", () => {
+      resetPeerConnections();
+      joinRoom();
+    });
+
+    socket.on("disconnect", () => {
+      resetPeerConnections();
+    });
+
+    if (socket.connected) {
+      joinRoom();
+    }
 
     socket.on("meeting:room-state", async (roomState: RoomStatePayload) => {
       setParticipants((current) => mergeParticipants(current, roomState.participants));
@@ -385,6 +407,8 @@ export function MeetingPage() {
     return () => {
       socket.emit("meeting:leave-room", { code: meetingCode });
       socket.off("meeting:room-state");
+      socket.off("connect");
+      socket.off("disconnect");
       socket.off("participant:joined");
       socket.off("participant:left");
       socket.off("participant:updated");
@@ -397,11 +421,7 @@ export function MeetingPage() {
       socket.off("webrtc:ice-candidate");
       socket.off("meeting:ended");
       socket.off("error:message");
-
-      peerConnectionsRef.current.forEach((connection) => connection.close());
-      peerConnectionsRef.current.clear();
-      pendingIceCandidatesRef.current.clear();
-      setRemoteStreams([]);
+      resetPeerConnections();
     };
   }, [localStream, meetingCode, navigate, token]);
 
