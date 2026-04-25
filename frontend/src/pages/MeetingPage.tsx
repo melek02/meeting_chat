@@ -41,6 +41,72 @@ type SpeechDebugState = {
   lifecycleEvent: string;
 };
 
+type SpeechRecognitionErrorCode =
+  | "aborted"
+  | "audio-capture"
+  | "bad-grammar"
+  | "language-not-supported"
+  | "network"
+  | "no-speech"
+  | "not-allowed"
+  | "service-not-allowed"
+  | (string & {});
+
+type SpeechRecognitionErrorEventLike = {
+  error: SpeechRecognitionErrorCode;
+  message?: string;
+};
+
+type SpeechRecognitionAlternativeLike = {
+  transcript?: string;
+};
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  [index: number]: SpeechRecognitionAlternativeLike;
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: {
+    length: number;
+    [index: number]: SpeechRecognitionResultLike;
+  };
+};
+
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+
+  start: () => void;
+  stop: () => void;
+
+  onstart: (() => void) | null;
+  onaudiostart: (() => void) | null;
+  onsoundstart: (() => void) | null;
+  onspeechstart: (() => void) | null;
+  onspeechend: (() => void) | null;
+  onaudioend: (() => void) | null;
+  onnomatch: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+type SpeechRecognitionWindow = Window &
+  typeof globalThis & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+
+function getSpeechRecognitionConstructor() {
+  const speechWindow = window as SpeechRecognitionWindow;
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+}
 
 export function MeetingPage() {
   const { code = "" } = useParams();
@@ -52,25 +118,36 @@ export function MeetingPage() {
   const [participants, setParticipants] = useState<MeetingParticipant[]>([]);
   const [transcript, setTranscript] = useState<TranscriptTurn[]>([]);
   const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
+
   const [speechText, setSpeechText] = useState(
     "I started speaking earlier, but a shorter later sentence may complete first."
   );
+
   const [segmentCount, setSegmentCount] = useState(3);
   const [startDelayMs, setStartDelayMs] = useState(0);
   const [chunkDelayMs, setChunkDelayMs] = useState(400);
   const [finalDelayMs, setFinalDelayMs] = useState(250);
   const [failMode, setFailMode] = useState<"none" | "partial" | "final">("none");
+
   const [muted, setMuted] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [splitScreen, setSplitScreen] = useState(false);
   const [queueDepth, setQueueDepth] = useState(0);
   const [error, setError] = useState("");
-  const [rtcConfiguration, setRtcConfiguration] = useState<RTCConfiguration>({ iceServers: [] });
+
+  const [rtcConfiguration, setRtcConfiguration] = useState<RTCConfiguration>({
+    iceServers: [],
+  });
+
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStreamEntry[]>([]);
+
   const [speechRecognitionAvailable, setSpeechRecognitionAvailable] = useState(false);
   const [transcriptionEnabled, setTranscriptionEnabled] = useState(false);
-  const [transcriptionState, setTranscriptionState] = useState<"idle" | "starting" | "running" | "error">("idle");
+  const [transcriptionState, setTranscriptionState] = useState<
+    "idle" | "starting" | "running" | "error"
+  >("idle");
+
   const [speechDebug, setSpeechDebug] = useState<SpeechDebugState>({
     heardText: "",
     lastEmittedText: "",
@@ -83,11 +160,13 @@ export function MeetingPage() {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const pendingIceCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const localTurnRef = useRef<LocalTurnState | null>(null);
   const recognitionRunningRef = useRef(false);
   const transcriptionDesiredRef = useRef(false);
   const manualStopRef = useRef(false);
+
   const tokenRef = useRef<string | null>(token);
   const meetingCodeRef = useRef(meetingCode);
   const meetingReadyRef = useRef(false);
@@ -105,31 +184,35 @@ export function MeetingPage() {
   }, [meeting]);
 
   useEffect(() => {
-  async function loadRtcConfig() {
-    try {
-      const res = await fetch(
-        `${import.meta.env.VITE_API_URL ?? "http://localhost:4000"}/rtc-config`
-      );
-      const data = await res.json() as { iceServers: RTCIceServer[] };
-      setRtcConfiguration({ iceServers: data.iceServers });
-    } catch {
-      setRtcConfiguration({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
+    async function loadRtcConfig() {
+      try {
+        const res = await fetch(
+          `${import.meta.env.VITE_API_URL ?? "http://localhost:4000"}/rtc-config`
+        );
+
+        const data = (await res.json()) as { iceServers: RTCIceServer[] };
+        setRtcConfiguration({ iceServers: data.iceServers });
+      } catch {
+        setRtcConfiguration({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+      }
     }
-  }
-  void loadRtcConfig();
-}, []);
+
+    void loadRtcConfig();
+  }, []);
 
   useEffect(() => {
     if (!token) {
       return;
     }
 
-        async function loadMeeting() {
-          if (!token) return;
-          try {
-            await api.joinMeeting(token, code);
+    async function loadMeeting() {
+      if (!token) return;
+
+      try {
+        await api.joinMeeting(token, code);
+
         const [meetingResponse, transcriptResponse] = await Promise.all([
           api.getMeeting(token, code),
           api.getTranscript(token, code),
@@ -137,6 +220,7 @@ export function MeetingPage() {
 
         setMeeting(meetingResponse);
         setParticipants(meetingResponse.participants);
+
         setTranscript(
           transcriptResponse.map((turn: TranscriptHistoryTurn) => ({
             turnId: turn.id,
@@ -144,7 +228,9 @@ export function MeetingPage() {
             participantName: turn.meetingParticipant.displayName,
             sequenceNumber: turn.sequenceNumber,
             speechStartTime: new Date(turn.speechStartTime).getTime(),
-            speechEndTime: turn.speechEndTime ? new Date(turn.speechEndTime).getTime() : undefined,
+            speechEndTime: turn.speechEndTime
+              ? new Date(turn.speechEndTime).getTime()
+              : undefined,
             text: turn.latestText,
             isFinal: turn.status === "FINAL",
             status: turn.status,
@@ -160,7 +246,7 @@ export function MeetingPage() {
   }, [code, token]);
 
   useEffect(() => {
-    const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    const SpeechRecognitionCtor = getSpeechRecognitionConstructor();
     setSpeechRecognitionAvailable(Boolean(SpeechRecognitionCtor));
   }, []);
 
@@ -181,7 +267,11 @@ export function MeetingPage() {
 
         setLocalStream(stream);
       } catch (mediaError) {
-        setError(mediaError instanceof Error ? mediaError.message : "Unable to access camera/microphone");
+        setError(
+          mediaError instanceof Error
+            ? mediaError.message
+            : "Unable to access camera/microphone"
+        );
       }
     }
 
@@ -204,7 +294,10 @@ export function MeetingPage() {
     if (!token || !meetingCode || !localStream) {
       return;
     }
-    if (!rtcConfiguration.iceServers?.length) return;
+
+    if (!rtcConfiguration.iceServers?.length) {
+      return;
+    }
 
     const socket = getSocket(token);
 
@@ -215,89 +308,101 @@ export function MeetingPage() {
       setRemoteStreams([]);
     };
 
-    const ensurePeerConnection = async (targetSocketId: string, shouldCreateOffer: boolean) => {
-  if (peerConnectionsRef.current.has(targetSocketId)) {
-    return peerConnectionsRef.current.get(targetSocketId)!;
-  }
+    const ensurePeerConnection = async (
+      targetSocketId: string,
+      shouldCreateOffer: boolean
+    ) => {
+      const existingConnection = peerConnectionsRef.current.get(targetSocketId);
 
-  const peerConnection = new RTCPeerConnection(rtcConfiguration);
+      if (existingConnection) {
+        return existingConnection;
+      }
 
-  // Create one MediaStream per peer, attach tracks as they arrive
-  const remoteStream = new MediaStream();
+      const peerConnection = new RTCPeerConnection(rtcConfiguration);
+      const remoteStream = new MediaStream();
 
-  localStream.getTracks().forEach((track) => {
-    peerConnection.addTrack(track, localStream);
-  });
+      localStream.getTracks().forEach((track) => {
+        peerConnection.addTrack(track, localStream);
+      });
 
-  peerConnection.ontrack = (event) => {
-    event.track.onunmute = () => {
-      remoteStream.addTrack(event.track);
-      setRemoteStreams((current) => {
-        const exists = current.find((e) => e.socketId === targetSocketId);
-        if (exists) {
-          return current.map((e) =>
-            e.socketId === targetSocketId
-              ? { ...e, stream: remoteStream }
-              : e
+      peerConnection.ontrack = (event) => {
+        const addRemoteStream = () => {
+          if (!remoteStream.getTracks().some((track) => track.id === event.track.id)) {
+            remoteStream.addTrack(event.track);
+          }
+
+          setRemoteStreams((current) => {
+            const exists = current.find((entry) => entry.socketId === targetSocketId);
+
+            if (exists) {
+              return current.map((entry) =>
+                entry.socketId === targetSocketId
+                  ? { ...entry, stream: remoteStream }
+                  : entry
+              );
+            }
+
+            return [...current, { socketId: targetSocketId, stream: remoteStream }];
+          });
+        };
+
+        event.track.onunmute = addRemoteStream;
+        addRemoteStream();
+      };
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit("webrtc:ice-candidate", {
+            code: meetingCode,
+            targetSocketId,
+            candidate: event.candidate,
+          });
+        }
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log(`ICE state [${targetSocketId}]:`, peerConnection.iceConnectionState);
+
+        if (
+          ["disconnected", "failed", "closed"].includes(peerConnection.iceConnectionState)
+        ) {
+          cleanupPeerConnection(
+            peerConnectionsRef,
+            pendingIceCandidatesRef,
+            setRemoteStreams,
+            targetSocketId
           );
         }
-        return [...current, { socketId: targetSocketId, stream: remoteStream }];
-      });
-    };
+      };
 
-    // Also add immediately in case onunmute doesn't fire
-    remoteStream.addTrack(event.track);
-    setRemoteStreams((current) => {
-      const exists = current.find((e) => e.socketId === targetSocketId);
-      if (exists) {
-        return current.map((e) =>
-          e.socketId === targetSocketId
-            ? { ...e, stream: remoteStream }
-            : e
-        );
+      peerConnection.onconnectionstatechange = () => {
+        console.log(`Connection state [${targetSocketId}]:`, peerConnection.connectionState);
+
+        if (["disconnected", "failed", "closed"].includes(peerConnection.connectionState)) {
+          cleanupPeerConnection(
+            peerConnectionsRef,
+            pendingIceCandidatesRef,
+            setRemoteStreams,
+            targetSocketId
+          );
+        }
+      };
+
+      peerConnectionsRef.current.set(targetSocketId, peerConnection);
+
+      if (shouldCreateOffer) {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        socket.emit("webrtc:offer", {
+          code: meetingCode,
+          targetSocketId,
+          sdp: offer,
+        });
       }
-      return [...current, { socketId: targetSocketId, stream: remoteStream }];
-    });
-  };
 
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate) {
-      socket.emit("webrtc:ice-candidate", {
-        code: meetingCode,
-        targetSocketId,
-        candidate: event.candidate,
-      });
-    }
-  };
-
-  peerConnection.oniceconnectionstatechange = () => {
-    console.log(`ICE state [${targetSocketId}]:`, peerConnection.iceConnectionState);
-    if (["disconnected", "failed", "closed"].includes(peerConnection.iceConnectionState)) {
-      cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
-    }
-  };
-
-  peerConnection.onconnectionstatechange = () => {
-    console.log(`Connection state [${targetSocketId}]:`, peerConnection.connectionState);
-    if (["disconnected", "failed", "closed"].includes(peerConnection.connectionState)) {
-      cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
-    }
-  };
-
-  peerConnectionsRef.current.set(targetSocketId, peerConnection);
-
-  if (shouldCreateOffer) {
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socket.emit("webrtc:offer", {
-      code: meetingCode,
-      targetSocketId,
-      sdp: offer,
-    });
-  }
-
-  return peerConnection;
-};
+      return peerConnection;
+    };
 
     const joinRoom = () => {
       socket.emit("meeting:join-room", { code: meetingCode });
@@ -343,13 +448,18 @@ export function MeetingPage() {
 
     socket.on("participant:updated", (participant: MeetingParticipant) => {
       setParticipants((current) =>
-        current.map((entry) => (entry.id === participant.id ? { ...entry, ...participant } : entry))
+        current.map((entry) =>
+          entry.id === participant.id ? { ...entry, ...participant } : entry
+        )
       );
     });
 
-    socket.on("active-speaker:changed", ({ participantId }: { participantId: string | null }) => {
-      setActiveSpeakerId(participantId);
-    });
+    socket.on(
+      "active-speaker:changed",
+      ({ participantId }: { participantId: string | null }) => {
+        setActiveSpeakerId(participantId);
+      }
+    );
 
     socket.on("transcript:snapshot", (snapshot: TranscriptSnapshot) => {
       setTranscript((current) => mergeTranscriptTurns(current, snapshot.items));
@@ -364,47 +474,85 @@ export function MeetingPage() {
       setTranscript((current) => mergeTranscriptTurns(current, [item]));
     });
 
-    socket.on("webrtc:offer", async ({ fromSocketId, sdp }: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
-      const peerConnection = await ensurePeerConnection(fromSocketId, false);
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-      await flushPendingIceCandidates(fromSocketId, peerConnectionsRef.current, pendingIceCandidatesRef.current);
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
+    socket.on(
+      "webrtc:offer",
+      async ({
+        fromSocketId,
+        sdp,
+      }: {
+        fromSocketId: string;
+        sdp: RTCSessionDescriptionInit;
+      }) => {
+        const peerConnection = await ensurePeerConnection(fromSocketId, false);
 
-      socket.emit("webrtc:answer", {
-        code: meetingCode,
-        targetSocketId: fromSocketId,
-        sdp: answer,
-      });
-    });
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+        await flushPendingIceCandidates(
+          fromSocketId,
+          peerConnectionsRef.current,
+          pendingIceCandidatesRef.current
+        );
 
-    socket.on("webrtc:answer", async ({ fromSocketId, sdp }: { fromSocketId: string; sdp: RTCSessionDescriptionInit }) => {
-      const peerConnection = peerConnectionsRef.current.get(fromSocketId);
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
 
-      if (!peerConnection) {
-        return;
+        socket.emit("webrtc:answer", {
+          code: meetingCode,
+          targetSocketId: fromSocketId,
+          sdp: answer,
+        });
       }
+    );
 
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-      await flushPendingIceCandidates(fromSocketId, peerConnectionsRef.current, pendingIceCandidatesRef.current);
-    });
+    socket.on(
+      "webrtc:answer",
+      async ({
+        fromSocketId,
+        sdp,
+      }: {
+        fromSocketId: string;
+        sdp: RTCSessionDescriptionInit;
+      }) => {
+        const peerConnection = peerConnectionsRef.current.get(fromSocketId);
 
-    socket.on("webrtc:ice-candidate", async ({ fromSocketId, candidate }: { fromSocketId: string; candidate: RTCIceCandidateInit }) => {
-      const peerConnection =
-        peerConnectionsRef.current.get(fromSocketId) ?? (await ensurePeerConnection(fromSocketId, false));
+        if (!peerConnection) {
+          return;
+        }
 
-      if (!peerConnection.remoteDescription) {
-        const current = pendingIceCandidatesRef.current.get(fromSocketId) ?? [];
-        pendingIceCandidatesRef.current.set(fromSocketId, [...current, candidate]);
-        return;
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+        await flushPendingIceCandidates(
+          fromSocketId,
+          peerConnectionsRef.current,
+          pendingIceCandidatesRef.current
+        );
       }
+    );
 
-      try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (iceError) {
-        console.error("failed to add ICE candidate", iceError);
+    socket.on(
+      "webrtc:ice-candidate",
+      async ({
+        fromSocketId,
+        candidate,
+      }: {
+        fromSocketId: string;
+        candidate: RTCIceCandidateInit;
+      }) => {
+        const peerConnection =
+          peerConnectionsRef.current.get(fromSocketId) ??
+          (await ensurePeerConnection(fromSocketId, false));
+
+        if (!peerConnection.remoteDescription) {
+          const current = pendingIceCandidatesRef.current.get(fromSocketId) ?? [];
+          pendingIceCandidatesRef.current.set(fromSocketId, [...current, candidate]);
+          return;
+        }
+
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (iceError) {
+          console.error("failed to add ICE candidate", iceError);
+        }
       }
-    });
+    );
 
     socket.on("meeting:ended", () => {
       navigate("/home");
@@ -416,6 +564,7 @@ export function MeetingPage() {
 
     return () => {
       socket.emit("meeting:leave-room", { code: meetingCode });
+
       socket.off("meeting:room-state");
       socket.off("connect");
       socket.off("disconnect");
@@ -431,6 +580,7 @@ export function MeetingPage() {
       socket.off("webrtc:ice-candidate");
       socket.off("meeting:ended");
       socket.off("error:message");
+
       resetPeerConnections();
     };
   }, [localStream, meetingCode, navigate, token, rtcConfiguration]);
@@ -440,13 +590,14 @@ export function MeetingPage() {
       return;
     }
 
-    const SpeechRecognitionCtor = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    const SpeechRecognitionCtor = getSpeechRecognitionConstructor();
 
     if (!SpeechRecognitionCtor) {
       return;
     }
 
     const recognition = new SpeechRecognitionCtor();
+
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.lang = "en-US";
@@ -456,6 +607,7 @@ export function MeetingPage() {
       recognitionRunningRef.current = true;
       setTranscriptionState("running");
       setError("");
+
       setSpeechDebug((current) => ({
         ...current,
         lifecycleEvent: "onstart",
@@ -506,10 +658,12 @@ export function MeetingPage() {
 
     recognition.onresult = (event) => {
       setError("");
+
       setSpeechDebug((current) => ({
         ...current,
         lifecycleEvent: "onresult",
       }));
+
       handleRecognitionResult(event, {
         tokenRef,
         meetingCodeRef,
@@ -519,67 +673,72 @@ export function MeetingPage() {
       });
     };
 
-  recognition.onerror = (event) => {
-    recognitionRunningRef.current = false;
-    setSpeechDebug((current) => ({
-      ...current,
-      lifecycleEvent: `onerror:${event.error}`,
-    }));
+    recognition.onerror = (event) => {
+      recognitionRunningRef.current = false;
 
-    const recoverableErrors = new Set<SpeechRecognitionErrorEvent["error"]>([
-      "aborted",
-      "no-speech",
-      "audio-capture",
-    ]);
+      console.error("Speech recognition error:", event.error, event.message);
 
-    if (recoverableErrors.has(event.error)) {
-      setTranscriptionState("starting");
-      setError(
-        event.error === "no-speech"
-          ? "Listening for speech..."
-          : event.error === "audio-capture"
-            ? "Mic busy, retrying..."
-            : "Transcription was interrupted. Restarting..."
-      );
-      // force restart immediately instead of waiting for onend
+      setSpeechDebug((current) => ({
+        ...current,
+        lifecycleEvent: `onerror:${event.error}`,
+      }));
+
+      const recoverableErrors = new Set<SpeechRecognitionErrorCode>([
+        "aborted",
+        "no-speech",
+        "audio-capture",
+      ]);
+
+      if (recoverableErrors.has(event.error)) {
+        setTranscriptionState("starting");
+
+        setError(
+          event.error === "no-speech"
+            ? "Listening for speech..."
+            : event.error === "audio-capture"
+              ? "Mic busy, retrying..."
+              : "Transcription was interrupted. Restarting..."
+        );
+
+        return;
+      }
+
+      transcriptionDesiredRef.current = false;
+      setTranscriptionState("error");
+      setTranscriptionEnabled(false);
+      setError(getSpeechRecognitionErrorMessage(event));
+    };
+
+    recognition.onend = () => {
+      recognitionRunningRef.current = false;
+
+      setSpeechDebug((current) => ({
+        ...current,
+        lifecycleEvent: "onend",
+      }));
+
+      if (manualStopRef.current) {
+        manualStopRef.current = false;
+        setTranscriptionState("idle");
+        return;
+      }
+
       if (transcriptionDesiredRef.current) {
         window.setTimeout(() => {
-          void startRecognition(recognitionRef, recognitionRunningRef, setTranscriptionState, setError);
-        }, 300);
+          void startRecognition(
+            recognitionRef,
+            recognitionRunningRef,
+            setTranscriptionState,
+            setError
+          );
+        }, 600);
+      } else {
+        setTranscriptionState("idle");
       }
-      return;
-    }
-
-    transcriptionDesiredRef.current = false;
-    setTranscriptionState("error");
-    setTranscriptionEnabled(false);
-    setError(getSpeechRecognitionErrorMessage(event));
-  };
-
-  recognition.onend = () => {
-  recognitionRunningRef.current = false;
-  setSpeechDebug((current) => ({
-    ...current,
-    lifecycleEvent: "onend",
-  }));
-
-  if (manualStopRef.current) {
-    manualStopRef.current = false;
-    setTranscriptionState("idle");
-    return;
-  }
-
-  if (transcriptionDesiredRef.current) {
-    // use a longer delay to avoid colliding with onerror restart
-    window.setTimeout(() => {
-      void startRecognition(recognitionRef, recognitionRunningRef, setTranscriptionState, setError);
-    }, 600);
-  } else {
-    setTranscriptionState("idle");
-  }
-};
+    };
 
     recognitionRef.current = recognition;
+
     setSpeechDebug((current) => ({
       ...current,
       lifecycleEvent: "recognizer-created",
@@ -587,9 +746,22 @@ export function MeetingPage() {
 
     return () => {
       transcriptionDesiredRef.current = false;
+
+      recognition.onstart = null;
+      recognition.onaudiostart = null;
+      recognition.onsoundstart = null;
+      recognition.onspeechstart = null;
+      recognition.onspeechend = null;
+      recognition.onaudioend = null;
+      recognition.onnomatch = null;
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+
       if (recognitionRunningRef.current) {
         recognition.stop();
       }
+
       recognitionRunningRef.current = false;
       recognitionRef.current = null;
     };
@@ -618,6 +790,7 @@ export function MeetingPage() {
     }
 
     const socket = getSocket(token);
+
     socket.emit("transcript:simulate-turn", {
       code: meetingCode,
       text: speechText,
@@ -646,7 +819,9 @@ export function MeetingPage() {
       recognitionRef.current?.stop();
       recognitionRunningRef.current = false;
     }
+
     localStream?.getTracks().forEach((track) => track.stop());
+
     getSocket(token).emit("meeting:leave-room", { code: meetingCode });
     navigate("/home");
   }
@@ -657,10 +832,13 @@ export function MeetingPage() {
     }
 
     const nextMuted = !muted;
+
     setMuted(nextMuted);
+
     localStream.getAudioTracks().forEach((track) => {
       track.enabled = !nextMuted;
     });
+
     getSocket(token).emit("participant:toggle-mute", { code: meetingCode });
   }
 
@@ -690,16 +868,24 @@ export function MeetingPage() {
           recognitionRef.current?.stop();
           recognitionRunningRef.current = false;
         }
+
         setTranscriptionState("idle");
         setError("");
       } else {
         setTranscriptionState("starting");
         setError("");
+
         setSpeechDebug((currentDebug) => ({
           ...currentDebug,
           lifecycleEvent: "start-button-clicked",
         }));
-        void startRecognition(recognitionRef, recognitionRunningRef, setTranscriptionState, setError);
+
+        void startRecognition(
+          recognitionRef,
+          recognitionRunningRef,
+          setTranscriptionState,
+          setError
+        );
       }
 
       return next;
@@ -707,7 +893,7 @@ export function MeetingPage() {
   }
 
   return (
-    <div className="meeting-shell">
+    <div className={`meeting-shell ${fullscreen ? "fullscreen" : ""}`}>
       <header className="meeting-header">
         <div>
           <h1>{meeting?.title ?? `Meeting ${code}`}</h1>
@@ -715,8 +901,12 @@ export function MeetingPage() {
             Code: <strong>{code}</strong> | Queue depth: <strong>{queueDepth}</strong>
           </p>
         </div>
+
         <div className="header-actions">
-          <button type="button" onClick={handleRunDemo}>Run demo scenario</button>
+          <button type="button" onClick={handleRunDemo}>
+            Run demo scenario
+          </button>
+
           <button type="button" onClick={handleToggleTranscription}>
             {transcriptionEnabled ? "Stop transcription" : "Start transcription"}
           </button>
@@ -728,6 +918,7 @@ export function MeetingPage() {
       <main className={`meeting-grid ${splitScreen ? "split-screen" : ""}`}>
         <section className="panel participants-panel">
           <h2>Live call</h2>
+
           <div className="participant-column">
             <article
               className={`participant-tile local-tile ${
@@ -736,31 +927,47 @@ export function MeetingPage() {
                   : ""
               }`}
             >
-              <video ref={localVideoRef} autoPlay muted playsInline className="participant-video" />
+              <video
+                ref={localVideoRef}
+                autoPlay
+                muted
+                playsInline
+                className="participant-video"
+              />
+
               <div>
                 <strong>{user?.name} (You)</strong>
                 <p>
                   {muted ? "Muted" : "Mic live"} |{" "}
-                  {transcriptionEnabled ? `Transcription ${transcriptionState}` : "Transcription off"}
+                  {transcriptionEnabled
+                    ? `Transcription ${transcriptionState}`
+                    : "Transcription off"}
                 </p>
               </div>
             </article>
 
             {remoteStreams.map((remoteEntry) => {
-              const participant = participants.find((entry) => entry.socketId === remoteEntry.socketId);
+              const participant = participants.find(
+                (entry) => entry.socketId === remoteEntry.socketId
+              );
 
               return (
                 <RemoteVideoCard
                   key={remoteEntry.socketId}
                   stream={remoteEntry.stream}
-                  title={participant?.displayName ?? `Peer ${remoteEntry.socketId.slice(0, 6)}`}
+                  title={
+                    participant?.displayName ?? `Peer ${remoteEntry.socketId.slice(0, 6)}`
+                  }
                   active={participant?.id === activeSpeakerId}
                 />
               );
             })}
 
             {participants
-              .filter((participant) => !participant.socketId && participant.id !== localParticipantId)
+              .filter(
+                (participant) =>
+                  !participant.socketId && participant.id !== localParticipantId
+              )
               .map((participant) => (
                 <article
                   key={participant.id}
@@ -768,7 +975,10 @@ export function MeetingPage() {
                     activeSpeakerId === participant.id ? "active-speaker" : ""
                   }`}
                 >
-                  <div className="participant-avatar">{participant.displayName.slice(0, 1).toUpperCase()}</div>
+                  <div className="participant-avatar">
+                    {participant.displayName.slice(0, 1).toUpperCase()}
+                  </div>
+
                   <div>
                     <strong>{participant.displayName}</strong>
                     <p>{participant.muted ? "Muted" : "Connected"}</p>
@@ -780,14 +990,19 @@ export function MeetingPage() {
 
         <section className="panel transcript-panel">
           <h2>Transcript chat</h2>
+
           <div className="transcript-column">
             {sortedTranscript.map((turn) => (
-              <article key={turn.turnId} className={`transcript-item ${turn.isFinal ? "final" : "partial"}`}>
+              <article
+                key={turn.turnId}
+                className={`transcript-item ${turn.isFinal ? "final" : "partial"}`}
+              >
                 <div className="transcript-meta">
                   <strong>{turn.participantName}</strong>
                   <span>seq {turn.sequenceNumber}</span>
                   <span>{turn.status}</span>
                 </div>
+
                 <p>{turn.text || "<waiting>"}</p>
               </article>
             ))}
@@ -795,15 +1010,21 @@ export function MeetingPage() {
         </section>
       </main>
 
-      
-
       <section className="panel simulation-panel">
         <h2>Simulation mode</h2>
+
         <p>
-          Real call audio/video runs through WebRTC above. This panel remains for testing uneven worker speeds and
-          proving that ordering stays correct even when completion finishes out of order.
+          Real call audio/video runs through WebRTC above. This panel remains for testing
+          uneven worker speeds and proving that ordering stays correct even when completion
+          finishes out of order.
         </p>
-        <textarea value={speechText} onChange={(event) => setSpeechText(event.target.value)} rows={4} />
+
+        <textarea
+          value={speechText}
+          onChange={(event) => setSpeechText(event.target.value)}
+          rows={4}
+        />
+
         <div className="simulation-grid">
           <label>
             <span>Start delay</span>
@@ -813,6 +1034,7 @@ export function MeetingPage() {
               onChange={(event) => setStartDelayMs(Number(event.target.value))}
             />
           </label>
+
           <label>
             <span>Chunk delay</span>
             <input
@@ -821,6 +1043,7 @@ export function MeetingPage() {
               onChange={(event) => setChunkDelayMs(Number(event.target.value))}
             />
           </label>
+
           <label>
             <span>Final delay</span>
             <input
@@ -829,6 +1052,7 @@ export function MeetingPage() {
               onChange={(event) => setFinalDelayMs(Number(event.target.value))}
             />
           </label>
+
           <label>
             <span>Segments</span>
             <input
@@ -839,29 +1063,42 @@ export function MeetingPage() {
               onChange={(event) => setSegmentCount(Number(event.target.value))}
             />
           </label>
+
           <label>
             <span>Failure mode</span>
-            <select value={failMode} onChange={(event) => setFailMode(event.target.value as typeof failMode)}>
+            <select
+              value={failMode}
+              onChange={(event) => setFailMode(event.target.value as typeof failMode)}
+            >
               <option value="none">none</option>
               <option value="partial">fail after first partial</option>
               <option value="final">fail before final</option>
             </select>
           </label>
         </div>
+
         <button type="button" className="primary-button" onClick={handleSimulateTurn}>
           Run simulated turn
         </button>
       </section>
 
       <footer className="controls-bar">
-        <button type="button" onClick={handleHangUp}>Hang up</button>
-        <button type="button" onClick={handleToggleMute}>{muted ? "Unmute microphone" : "Mute microphone"}</button>
+        <button type="button" onClick={handleHangUp}>
+          Hang up
+        </button>
+
+        <button type="button" onClick={handleToggleMute}>
+          {muted ? "Unmute microphone" : "Mute microphone"}
+        </button>
+
         <button type="button" onClick={() => setFullscreen((current) => !current)}>
           {fullscreen ? "Exit fullscreen" : "Fullscreen"}
         </button>
+
         <button type="button" onClick={() => setSplitScreen((current) => !current)}>
           {splitScreen ? "Single screen" : "Split-screen"}
         </button>
+
         <span className="controls-note">
           {speechRecognitionAvailable
             ? `Browser speech recognition available (${transcriptionState})`
@@ -873,9 +1110,11 @@ export function MeetingPage() {
 }
 
 async function startRecognition(
-  recognitionRef: MutableRefObject<SpeechRecognition | null>,
+  recognitionRef: MutableRefObject<SpeechRecognitionLike | null>,
   recognitionRunningRef: MutableRefObject<boolean>,
-  setTranscriptionState: Dispatch<SetStateAction<"idle" | "starting" | "running" | "error">>,
+  setTranscriptionState: Dispatch<
+    SetStateAction<"idle" | "starting" | "running" | "error">
+  >,
   setError: Dispatch<SetStateAction<string>>
 ) {
   if (recognitionRunningRef.current) {
@@ -892,22 +1131,23 @@ async function startRecognition(
 
   try {
     setTranscriptionState("starting");
-    recognitionRunningRef.current = true; // set BEFORE start() to block any parallel restarts
+    recognitionRunningRef.current = true;
     recognition.start();
   } catch (error) {
     recognitionRunningRef.current = false;
-    // if already started, don't treat as error - just mark as running
+
     if (error instanceof Error && error.message.includes("already started")) {
       setTranscriptionState("running");
       return;
     }
+
     setTranscriptionState("error");
     setError(error instanceof Error ? error.message : "Unable to start transcription.");
   }
 }
 
 function handleRecognitionResult(
-  event: SpeechRecognitionEvent,
+  event: SpeechRecognitionEventLike,
   options: {
     tokenRef: MutableRefObject<string | null>;
     meetingCodeRef: MutableRefObject<string>;
@@ -916,11 +1156,13 @@ function handleRecognitionResult(
     setSpeechDebug: Dispatch<SetStateAction<SpeechDebugState>>;
   }
 ) {
-  const { tokenRef, meetingCodeRef, meetingReadyRef, localTurnRef, setSpeechDebug } = options;
+  const { tokenRef, meetingCodeRef, meetingReadyRef, localTurnRef, setSpeechDebug } =
+    options;
+
   const token = tokenRef.current;
   const meetingCode = meetingCodeRef.current;
 
-  if (!token || !meetingCode) {
+  if (!token || !meetingCode || !meetingReadyRef.current) {
     return;
   }
 
@@ -979,31 +1221,41 @@ function handleRecognitionResult(
   }
 }
 
-function getSpeechRecognitionErrorMessage(event: SpeechRecognitionErrorEvent) {
+function getSpeechRecognitionErrorMessage(event: SpeechRecognitionErrorEventLike) {
   switch (event.error) {
     case "audio-capture":
       return "Speech recognition could not access your microphone.";
+
     case "not-allowed":
     case "service-not-allowed":
       return "Microphone or speech-recognition permission was denied.";
+
     case "network":
       return "Speech recognition hit a network error. Try again.";
+
     case "language-not-supported":
       return "This browser does not support the selected speech-recognition language.";
+
     case "aborted":
       return "Speech recognition was interrupted.";
+
     case "no-speech":
       return "No speech detected yet.";
+
     default:
       return event.message || "Speech recognition failed. Transcription stopped.";
   }
 }
 
-function mergeParticipants(current: MeetingParticipant[], incoming: MeetingParticipant[]) {
+function mergeParticipants(
+  current: MeetingParticipant[],
+  incoming: MeetingParticipant[]
+) {
   const byId = new Map(current.map((participant) => [participant.id, participant]));
 
   incoming.forEach((participant) => {
     const existing = byId.get(participant.id);
+
     byId.set(participant.id, {
       ...existing,
       ...participant,
@@ -1013,11 +1265,15 @@ function mergeParticipants(current: MeetingParticipant[], incoming: MeetingParti
   return Array.from(byId.values());
 }
 
-function mergeTranscriptTurns(current: TranscriptTurn[], incoming: TranscriptTurn[]) {
+function mergeTranscriptTurns(
+  current: TranscriptTurn[],
+  incoming: TranscriptTurn[]
+) {
   const byTurnId = new Map(current.map((turn) => [turn.turnId, turn]));
 
   incoming.forEach((turn) => {
     const existing = byTurnId.get(turn.turnId);
+
     byTurnId.set(turn.turnId, {
       ...existing,
       ...turn,
@@ -1047,7 +1303,10 @@ function cleanupPeerConnection(
   }
 
   pendingIceCandidatesRef.current.delete(targetSocketId);
-  setRemoteStreams((current) => current.filter((entry) => entry.socketId !== targetSocketId));
+
+  setRemoteStreams((current) =>
+    current.filter((entry) => entry.socketId !== targetSocketId)
+  );
 }
 
 async function flushPendingIceCandidates(
@@ -1111,6 +1370,7 @@ function RemoteVideoCard({
     <article className={`participant-tile ${active ? "active-speaker" : ""}`}>
       <video ref={videoRef} autoPlay playsInline className="participant-video" />
       <audio ref={audioRef} autoPlay playsInline />
+
       <div>
         <strong>{title}</strong>
         <p>Remote live stream</p>
