@@ -78,7 +78,7 @@ type SpeechRecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
-  maxAlternatives?: number; 
+  maxAlternatives?: number;
 
   start: () => void;
   stop: () => void;
@@ -94,8 +94,6 @@ type SpeechRecognitionLike = {
   onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
   onend: (() => void) | null;
 };
-
-type SpeechRecognitionConstructor = new () => unknown;
 
 type SpeechRecognitionWindow = Window &
   typeof globalThis & {
@@ -136,9 +134,13 @@ export function MeetingPage() {
   const [queueDepth, setQueueDepth] = useState(0);
   const [error, setError] = useState("");
 
-  const [rtcConfiguration, setRtcConfiguration] = useState<RTCConfiguration>({
-    iceServers: [],
-  });
+  // FIX: use a ref for rtcConfiguration so it doesn't cause the socket
+  // effect to re-run (and tear down/rejoin the room) when it loads.
+  // Previously this was useState which caused the socket effect to
+  // cleanup → leave room → rejoin, disrupting meeting state for joining
+  // friends right when they clicked Start Transcription.
+  const rtcConfigurationRef = useRef<RTCConfiguration>({ iceServers: [] });
+  const [rtcReady, setRtcReady] = useState(false);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStreamEntry[]>([]);
@@ -190,13 +192,15 @@ export function MeetingPage() {
         const res = await fetch(
           `${import.meta.env.VITE_API_URL ?? "http://localhost:4000"}/rtc-config`
         );
-
         const data = (await res.json()) as { iceServers: RTCIceServer[] };
-        setRtcConfiguration({ iceServers: data.iceServers });
+        // FIX: store in ref, not state, so socket effect doesn't re-run
+        rtcConfigurationRef.current = { iceServers: data.iceServers };
+        setRtcReady(true);
       } catch {
-        setRtcConfiguration({
+        rtcConfigurationRef.current = {
           iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-        });
+        };
+        setRtcReady(true);
       }
     }
 
@@ -292,11 +296,10 @@ export function MeetingPage() {
   }, [localStream]);
 
   useEffect(() => {
-    if (!token || !meetingCode || !localStream) {
-      return;
-    }
-
-    if (!rtcConfiguration.iceServers?.length) {
+    // FIX: depend on rtcReady (boolean) instead of rtcConfiguration (object)
+    // so this effect only runs once when RTC config is loaded, not every
+    // time the config object reference changes.
+    if (!token || !meetingCode || !localStream || !rtcReady) {
       return;
     }
 
@@ -319,7 +322,9 @@ export function MeetingPage() {
         return existingConnection;
       }
 
-      const peerConnection = new RTCPeerConnection(rtcConfiguration);
+      // FIX: read from ref so we always get the latest config without
+      // needing it as an effect dependency
+      const peerConnection = new RTCPeerConnection(rtcConfigurationRef.current);
       const remoteStream = new MediaStream();
 
       localStream.getTracks().forEach((track) => {
@@ -584,7 +589,8 @@ export function MeetingPage() {
 
       resetPeerConnections();
     };
-  }, [localStream, meetingCode, navigate, token, rtcConfiguration]);
+  // FIX: rtcReady instead of rtcConfiguration here
+  }, [localStream, meetingCode, navigate, token, rtcReady]);
 
   useEffect(() => {
     if (!speechRecognitionAvailable || recognitionRef.current) {
@@ -684,26 +690,22 @@ export function MeetingPage() {
         lifecycleEvent: `onerror:${event.error}`,
       }));
 
-      const recoverableErrors = new Set<SpeechRecognitionErrorCode>([
-        "aborted",
-        "no-speech",
-        "audio-capture",
-      ]);
-
-      if (recoverableErrors.has(event.error)) {
-        setTranscriptionState("starting");
-
-        setError(
-          event.error === "no-speech"
-            ? "Listening for speech..."
-            : event.error === "audio-capture"
-              ? "Mic busy, retrying..."
-              : "Transcription was interrupted. Restarting..."
-        );
-
+      // FIX: "aborted" means we called .stop() ourselves — ignore it,
+      // onend will handle the restart logic cleanly.
+      if (event.error === "aborted") {
         return;
       }
 
+      // FIX: "no-speech" is harmless — onend fires after this and will
+      // restart recognition automatically via the 600ms timeout.
+      if (event.error === "no-speech") {
+        setError("Listening for speech...");
+        return;
+      }
+
+      // FIX: everything else (not-allowed, audio-capture, network, etc.)
+      // is a real failure — stop transcription and show a clear message
+      // instead of silently looping and flickering the button.
       transcriptionDesiredRef.current = false;
       setTranscriptionState("error");
       setTranscriptionEnabled(false);
@@ -1225,7 +1227,7 @@ function handleRecognitionResult(
 function getSpeechRecognitionErrorMessage(event: SpeechRecognitionErrorEventLike) {
   switch (event.error) {
     case "audio-capture":
-      return "Speech recognition could not access your microphone.";
+      return "Could not access microphone. Check that no other app is blocking it, then try again.";
 
     case "not-allowed":
     case "service-not-allowed":
