@@ -95,17 +95,18 @@ type SpeechRecognitionLike = {
   onend: (() => void) | null;
 };
 
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+type SpeechRecognitionConstructor = new () => unknown;
 
 type SpeechRecognitionWindow = Window &
   typeof globalThis & {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    SpeechRecognition?: new () => unknown;
+    webkitSpeechRecognition?: new () => unknown;
   };
 
-function getSpeechRecognitionConstructor() {
+function getSpeechRecognitionConstructor(): (new () => SpeechRecognitionLike) | undefined {
   const speechWindow = window as SpeechRecognitionWindow;
-  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+  const Ctor = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+  return Ctor as unknown as (new () => SpeechRecognitionLike) | undefined;
 }
 
 export function MeetingPage() {
