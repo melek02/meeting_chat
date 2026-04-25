@@ -519,57 +519,65 @@ export function MeetingPage() {
       });
     };
 
-    recognition.onerror = (event) => {
-      recognitionRunningRef.current = false;
-      setSpeechDebug((current) => ({
-        ...current,
-        lifecycleEvent: `onerror:${event.error}`,
-      }));
-      const recoverableErrors = new Set<SpeechRecognitionErrorEvent["error"]>([
-        "aborted",
-        "no-speech",
-        "audio-capture", // ← only real change for Fix 3
-      ]);
+  recognition.onerror = (event) => {
+    recognitionRunningRef.current = false;
+    setSpeechDebug((current) => ({
+      ...current,
+      lifecycleEvent: `onerror:${event.error}`,
+    }));
 
-      if (recoverableErrors.has(event.error)) {
-        setTranscriptionState("starting");
-        setError(
-          event.error === "no-speech"
-            ? "Listening for speech..."
-            : event.error === "audio-capture"
-              ? "Mic busy, retrying..."
-              : "Transcription was interrupted. Restarting..."
-        );
-        return;
-      }
+    const recoverableErrors = new Set<SpeechRecognitionErrorEvent["error"]>([
+      "aborted",
+      "no-speech",
+      "audio-capture",
+    ]);
 
-      transcriptionDesiredRef.current = false;
-      setTranscriptionState("error");
-      setTranscriptionEnabled(false);
-      setError(getSpeechRecognitionErrorMessage(event));
-    };
-
-    recognition.onend = () => {
-      recognitionRunningRef.current = false;
-      setSpeechDebug((current) => ({
-        ...current,
-        lifecycleEvent: "onend",
-      }));
-
-      if (manualStopRef.current) {
-        manualStopRef.current = false;
-        setTranscriptionState("idle");
-        return;
-      }
-
+    if (recoverableErrors.has(event.error)) {
+      setTranscriptionState("starting");
+      setError(
+        event.error === "no-speech"
+          ? "Listening for speech..."
+          : event.error === "audio-capture"
+            ? "Mic busy, retrying..."
+            : "Transcription was interrupted. Restarting..."
+      );
+      // force restart immediately instead of waiting for onend
       if (transcriptionDesiredRef.current) {
         window.setTimeout(() => {
           void startRecognition(recognitionRef, recognitionRunningRef, setTranscriptionState, setError);
-        }, 150);
-      } else {
-        setTranscriptionState("idle");
+        }, 300);
       }
-    };
+      return;
+    }
+
+    transcriptionDesiredRef.current = false;
+    setTranscriptionState("error");
+    setTranscriptionEnabled(false);
+    setError(getSpeechRecognitionErrorMessage(event));
+  };
+
+  recognition.onend = () => {
+  recognitionRunningRef.current = false;
+  setSpeechDebug((current) => ({
+    ...current,
+    lifecycleEvent: "onend",
+  }));
+
+  if (manualStopRef.current) {
+    manualStopRef.current = false;
+    setTranscriptionState("idle");
+    return;
+  }
+
+  if (transcriptionDesiredRef.current) {
+    // use a longer delay to avoid colliding with onerror restart
+    window.setTimeout(() => {
+      void startRecognition(recognitionRef, recognitionRunningRef, setTranscriptionState, setError);
+    }, 600);
+  } else {
+    setTranscriptionState("idle");
+  }
+};
 
     recognitionRef.current = recognition;
     setSpeechDebug((current) => ({
@@ -884,9 +892,15 @@ async function startRecognition(
 
   try {
     setTranscriptionState("starting");
+    recognitionRunningRef.current = true; // set BEFORE start() to block any parallel restarts
     recognition.start();
   } catch (error) {
     recognitionRunningRef.current = false;
+    // if already started, don't treat as error - just mark as running
+    if (error instanceof Error && error.message.includes("already started")) {
+      setTranscriptionState("running");
+      return;
+    }
     setTranscriptionState("error");
     setError(error instanceof Error ? error.message : "Unable to start transcription.");
   }
