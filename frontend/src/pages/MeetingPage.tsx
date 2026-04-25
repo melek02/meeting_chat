@@ -598,8 +598,8 @@ export function MeetingPage() {
 
     const recognition = new SpeechRecognitionCtor();
 
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;
+    recognition.interimResults = true;
     recognition.lang = "en-US";
     recognition.maxAlternatives = 1;
 
