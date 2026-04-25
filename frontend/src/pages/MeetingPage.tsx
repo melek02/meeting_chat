@@ -78,7 +78,7 @@ type SpeechRecognitionLike = {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
-  maxAlternatives: number;
+  maxAlternatives?: number; 
 
   start: () => void;
   stop: () => void;
