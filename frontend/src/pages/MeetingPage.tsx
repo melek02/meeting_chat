@@ -205,7 +205,7 @@ export function MeetingPage() {
       return;
     }
     if (!rtcConfiguration.iceServers?.length) return;
-    
+
     const socket = getSocket(token);
 
     const resetPeerConnections = () => {
@@ -1066,15 +1066,13 @@ function RemoteVideoCard({
     const audioElement = audioRef.current;
 
     if (videoElement) {
-      const videoTracks = stream.getVideoTracks();
-      videoElement.srcObject = videoTracks.length ? new MediaStream(videoTracks) : null;
+      videoElement.srcObject = stream;
       videoElement.muted = true;
       void videoElement.play().catch(() => undefined);
     }
 
     if (audioElement) {
-      const audioTracks = stream.getAudioTracks();
-      audioElement.srcObject = audioTracks.length ? new MediaStream(audioTracks) : null;
+      audioElement.srcObject = stream;
       audioElement.muted = false;
       void audioElement.play().catch(() => undefined);
     }
