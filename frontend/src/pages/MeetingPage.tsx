@@ -216,73 +216,88 @@ export function MeetingPage() {
     };
 
     const ensurePeerConnection = async (targetSocketId: string, shouldCreateOffer: boolean) => {
-      if (peerConnectionsRef.current.has(targetSocketId)) {
-        return peerConnectionsRef.current.get(targetSocketId)!;
-      }
+  if (peerConnectionsRef.current.has(targetSocketId)) {
+    return peerConnectionsRef.current.get(targetSocketId)!;
+  }
 
-      const peerConnection = new RTCPeerConnection(rtcConfiguration);
+  const peerConnection = new RTCPeerConnection(rtcConfiguration);
 
-      localStream.getTracks().forEach((track) => {
-        peerConnection.addTrack(track, localStream);
+  // Create one MediaStream per peer, attach tracks as they arrive
+  const remoteStream = new MediaStream();
+
+  localStream.getTracks().forEach((track) => {
+    peerConnection.addTrack(track, localStream);
+  });
+
+  peerConnection.ontrack = (event) => {
+    event.track.onunmute = () => {
+      remoteStream.addTrack(event.track);
+      setRemoteStreams((current) => {
+        const exists = current.find((e) => e.socketId === targetSocketId);
+        if (exists) {
+          return current.map((e) =>
+            e.socketId === targetSocketId
+              ? { ...e, stream: remoteStream }
+              : e
+          );
+        }
+        return [...current, { socketId: targetSocketId, stream: remoteStream }];
       });
-
-      peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-          socket.emit("webrtc:ice-candidate", {
-            code: meetingCode,
-            targetSocketId,
-            candidate: event.candidate,
-          });
-        }
-      };
-
-      peerConnection.ontrack = (event) => {
-        const [stream] = event.streams;
-
-        setRemoteStreams((current) => {
-          const existing = current.find((entry) => entry.socketId === targetSocketId);
-          const remoteStream = stream ?? existing?.stream ?? new MediaStream();
-
-          if (!remoteStream.getTracks().some((track) => track.id === event.track.id)) {
-            remoteStream.addTrack(event.track);
-          }
-
-          if (existing) {
-            return current.map((entry) =>
-              entry.socketId === targetSocketId ? { ...entry, stream: remoteStream } : entry
-            );
-          }
-
-          return [...current, { socketId: targetSocketId, stream: remoteStream }];
-        });
-      };
-
-      peerConnection.oniceconnectionstatechange = () => {
-        if (["disconnected", "failed", "closed"].includes(peerConnection.iceConnectionState)) {
-          cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
-        }
-      };
-
-      peerConnection.onconnectionstatechange = () => {
-        if (["disconnected", "failed", "closed"].includes(peerConnection.connectionState)) {
-          cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
-        }
-      };
-
-      peerConnectionsRef.current.set(targetSocketId, peerConnection);
-
-      if (shouldCreateOffer) {
-        const offer = await peerConnection.createOffer();
-        await peerConnection.setLocalDescription(offer);
-        socket.emit("webrtc:offer", {
-          code: meetingCode,
-          targetSocketId,
-          sdp: offer,
-        });
-      }
-
-      return peerConnection;
     };
+
+    // Also add immediately in case onunmute doesn't fire
+    remoteStream.addTrack(event.track);
+    setRemoteStreams((current) => {
+      const exists = current.find((e) => e.socketId === targetSocketId);
+      if (exists) {
+        return current.map((e) =>
+          e.socketId === targetSocketId
+            ? { ...e, stream: remoteStream }
+            : e
+        );
+      }
+      return [...current, { socketId: targetSocketId, stream: remoteStream }];
+    });
+  };
+
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.emit("webrtc:ice-candidate", {
+        code: meetingCode,
+        targetSocketId,
+        candidate: event.candidate,
+      });
+    }
+  };
+
+  peerConnection.oniceconnectionstatechange = () => {
+    console.log(`ICE state [${targetSocketId}]:`, peerConnection.iceConnectionState);
+    if (["disconnected", "failed", "closed"].includes(peerConnection.iceConnectionState)) {
+      cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
+    }
+  };
+
+  peerConnection.onconnectionstatechange = () => {
+    console.log(`Connection state [${targetSocketId}]:`, peerConnection.connectionState);
+    if (["disconnected", "failed", "closed"].includes(peerConnection.connectionState)) {
+      cleanupPeerConnection(peerConnectionsRef, pendingIceCandidatesRef, setRemoteStreams, targetSocketId);
+    }
+  };
+
+  peerConnectionsRef.current.set(targetSocketId, peerConnection);
+
+  if (shouldCreateOffer) {
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    socket.emit("webrtc:offer", {
+      code: meetingCode,
+      targetSocketId,
+      sdp: offer,
+    });
+  }
+
+  return peerConnection;
+};
 
     const joinRoom = () => {
       socket.emit("meeting:join-room", { code: meetingCode });
