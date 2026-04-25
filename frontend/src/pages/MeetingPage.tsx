@@ -41,31 +41,7 @@ type SpeechDebugState = {
   lifecycleEvent: string;
 };
 
-const rtcConfiguration: RTCConfiguration = {
-  iceServers: [
-    {
-      urls: "stun:stun.l.google.com:19302",
-    },
-    {
-      urls: "stun:stun1.l.google.com:19302",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-  ],
-};
+
 export function MeetingPage() {
   const { code = "" } = useParams();
   const meetingCode = code.toUpperCase();
@@ -89,6 +65,7 @@ export function MeetingPage() {
   const [splitScreen, setSplitScreen] = useState(false);
   const [queueDepth, setQueueDepth] = useState(0);
   const [error, setError] = useState("");
+  const [rtcConfiguration, setRtcConfiguration] = useState<RTCConfiguration>({ iceServers: [] });
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<RemoteStreamEntry[]>([]);
   const [speechRecognitionAvailable, setSpeechRecognitionAvailable] = useState(false);
@@ -126,6 +103,23 @@ export function MeetingPage() {
   useEffect(() => {
     meetingReadyRef.current = Boolean(meeting);
   }, [meeting]);
+
+  useEffect(() => {
+  async function loadRtcConfig() {
+    try {
+      const res = await fetch(
+        `${import.meta.env.VITE_API_URL ?? "http://localhost:4000"}/rtc-config`
+      );
+      const data = await res.json() as { iceServers: RTCIceServer[] };
+      setRtcConfiguration({ iceServers: data.iceServers });
+    } catch {
+      setRtcConfiguration({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+    }
+  }
+  void loadRtcConfig();
+}, []);
 
   useEffect(() => {
     if (!token) {
@@ -210,7 +204,8 @@ export function MeetingPage() {
     if (!token || !meetingCode || !localStream) {
       return;
     }
-
+    if (!rtcConfiguration.iceServers?.length) return;
+    
     const socket = getSocket(token);
 
     const resetPeerConnections = () => {
@@ -423,7 +418,7 @@ export function MeetingPage() {
       socket.off("error:message");
       resetPeerConnections();
     };
-  }, [localStream, meetingCode, navigate, token]);
+  }, [localStream, meetingCode, navigate, token, rtcConfiguration]);
 
   useEffect(() => {
     if (!speechRecognitionAvailable || recognitionRef.current) {
